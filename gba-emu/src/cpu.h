@@ -16,10 +16,12 @@ typedef struct {
 
 void cpu_init(CPU *cpu);
 
-void cpu_decode_arm(CPU *cpu, uint32_t instruction);
+void cpu_decode_arm(CPU *cpu, Memory *memory, uint32_t instruction);
 
 void cpu_step(CPU *cpu, Memory *memory);
 
 void cpu_execute_branch(CPU *cpu, uint32_t instruction);
+
+void cpu_execute_single_transfer(CPU *cpu, Memory *memory, uint32_t instruction);
 
 #endif

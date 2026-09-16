@@ -60,15 +60,18 @@ int main (int argc, char *argv[]) {
     Memory memory;
     memory_init(&memory, rom, rom_size);
 
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 6; i++) {
         cpu_step(&cpu, &memory);
     }
 
     printf("\nFinal registers:\n");
-    printf("R0 = %u\n", cpu.r[0]);
-    printf("R1 = %u\n", cpu.r[1]);
-    printf("R2 = %u\n", cpu.r[2]);
-    printf("R3 = %u\n", cpu.r[3]);
+    printf("R0 = 0x%08X\n", cpu.r[0]);
+    printf("R1 = 0x%08X\n", cpu.r[1]);
+    printf("R2 = 0x%08X\n", cpu.r[2]);
+    printf("R3 = 0x%08X\n", cpu.r[3]);
+    printf("R4 = 0x%08X\n", cpu.r[4]);
+    printf("R5 = 0x%08X\n", cpu.r[5]);
+    printf("R6 = 0x%08X\n", cpu.r[6]);
     printf("PC = 0x%08X\n", cpu.r[15]);
 
     free(rom);

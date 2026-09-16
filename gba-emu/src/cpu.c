@@ -1,6 +1,11 @@
 #include <stdio.h>
 #include "cpu.h"
 
+typedef struct {
+    uint32_t value;
+    uint32_t carry;
+} Operand2Result;
+
 void cpu_init (CPU *cpu) {
     for (int i = 0; i < 16; i++) {
         cpu->r[i] = 0;
@@ -87,120 +92,194 @@ static void print_flags(CPU *cpu) {
                                     (cpu->cpsr & CPSR_C) != 0, (cpu->cpsr & CPSR_V) != 0);
 }
 
-void cpu_decode_arm (CPU *cpu, uint32_t instruction) {
-    uint32_t cond    = (instruction >> 28) & 0xF;
+static Operand2Result decode_operand2(CPU *cpu, uint32_t operand2, uint32_t i_bit) {
+    Operand2Result result;
+
+    result.value = 0;
+    result.carry = (cpu->cpsr & CPSR_C) != 0;
+
+    if(i_bit == 1) {
+        uint32_t rotate = (operand2 >> 8) & 0xF;
+        uint32_t imm = operand2 & 0xFF;
+        uint32_t amount = rotate * 2;
+
+        result.value = ror32(imm, amount);
+
+        if(amount != 0) {
+            result.carry = (result.value >> 31) & 1;
+        }
+
+        return result;
+    }
+
+    uint32_t rm = operand2 & 0xF;
+    uint32_t shift_by_register = (operand2 >> 4) & 1;
+    uint32_t shift_type = (operand2 >> 5) & 0x3;
+
+    uint32_t value = cpu->r[rm];
+
+    if (shift_by_register == 0) {
+        uint32_t amount = (operand2 >> 7) & 0x1F;
+
+        switch(shift_type) {
+            case 0x0: // LSL
+                if(amount == 0) {
+                    result.value = value;
+                } else {
+                    result.carry = (value >> (32 - amount)) & 1;
+                    result.value = value << amount;
+                }
+                break;
+            case 0x1: // LSR
+                if(amount == 0) {
+                    result.carry = (value >> 31) & 1;
+                    result.value = 0;
+                } else {
+                    result.carry = (value >> (amount - 1)) & 1;
+                    result.value = value >> amount;
+                }
+                break;
+            case 0x2: // ASR
+                if(amount == 0) {
+                    result.carry = (value >> 31) & 1;
+
+                    if(value & 0x80000000) {
+                        result.value = 0xFFFFFFFF;
+                    } else {
+                        result.value = 0;
+                    }
+                } else {
+                    result.carry = (value >> (amount - 1)) & 1;
+                    result.value = (uint32_t)((int32_t)value >> amount);
+                }
+                break;
+            case 0x3: // ROR / RRX
+                if(amount == 0) {
+                    uint32_t old_carry = (cpu->cpsr & CPSR_C) != 0;
+
+                    result.carry = value & 1;
+
+                    result.value = (old_carry << 31) | (value >> 1);
+                } else {
+                    result.value = ror32(value, amount);
+                    result.carry = (result.value >> 31) & 1;
+                }
+                break;
+        }
+
+        return result;
+    }
+
+    uint32_t rs = (operand2 >> 8) & 0xF;
+    uint32_t amount = cpu->r[rs] & 0xFF;
+
+    if(amount == 0) {
+        result.value = value;
+        return result;
+    }
+
+    switch(shift_type) {
+        case 0x0: // LSL
+            if(amount < 32) {
+                result.carry = (value >> (32 - amount)) & 1;
+                result.value = value << amount;
+            } else if (amount == 32) {
+                result.carry = value & 1;
+                result.value = 0;
+            } else {
+                result.carry = 0;
+                result.value = 0;
+            }
+            break;
+        case 0x1: // LSR
+            if(amount < 32) {
+                result.carry = (value >> (amount - 1)) & 1;
+                result.value = value >> amount;
+            } else if (amount == 32) {
+                result.carry = (value >> 31) & 1;
+                result.value = 0;
+            } else {
+                result.carry = 0;
+                result.value = 0;
+            }
+            break;
+        case 0x2: // ASR
+            if(amount < 32) {
+                result.carry = (value >> (amount - 1)) & 1;
+                result.value = (uint32_t)((int32_t)value >> amount);
+            } else {
+                result.carry = (value >> 31) & 1;
+                result.value = (value & 0x80000000) ? 0xFFFFFFFF : 0;
+            }
+            break;
+        case 0x3: // ROR
+            amount &= 31;
+            if(amount == 0) {
+                result.value = value;
+                result.carry = (value >> 31) & 1;
+            } else {
+                result.value = ror32(value, amount);
+                result.carry = (result.value >> 31) & 1;
+            }
+            break;
+    }
+    
+    return result;
+}
+
+void cpu_decode_arm (CPU *cpu, Memory *memory, uint32_t instruction) {
     uint32_t i_bit   = (instruction >> 25) & 0x1;
     uint32_t opcode  = (instruction >> 21) & 0xF;
     uint32_t s_bit   = (instruction >> 20) & 0x1;
     uint32_t rn      = (instruction >> 16)  & 0xF;
     uint32_t rd      = (instruction >> 12) & 0xF;
     uint32_t operand2 = instruction & 0xFFF;
-    uint32_t rs      = (operand2 >> 8) & 0xF;
 
-    uint32_t operand2_value;
+    Operand2Result op2 = decode_operand2(cpu, operand2, i_bit);
+    uint32_t operand2_value = op2.value;
 
-    if (i_bit == 1) {
-        uint32_t rotate = (operand2 >> 8) & 0xF;
-        uint32_t imm = operand2 & 0xFF;
+    if(opcode == 0x0) { // AND
+        printf("\nExecuting AND\n");
 
-        operand2_value = ror32(imm, rotate * 2);
-    } else {
-        uint32_t rm = operand2 & 0xF;
+        uint32_t result = cpu->r[rn] & operand2_value;
+        cpu->r[rd] = result;
 
-        uint32_t shift_by_register = (operand2 >> 4) & 0x1;
-        uint32_t shift_type = (operand2 >> 5) & 0x3;
-        uint32_t shift_amount = (operand2 >> 7) & 0x1F;
-
-        operand2_value = cpu->r[rm];
-
-        printf("\nOperand2 type: Register\n");
-        printf("Rm:            R%u\n", rm);
-        printf("Shift type:    %u\n", shift_type);
-        printf("Shift amount:  %u\n", shift_amount);
-
-        if(shift_by_register == 0) {
-            switch(shift_type) {
-                case 0x0: // LSL
-                    operand2_value = operand2_value << shift_amount;
-                    break;
-                case 0x1: // LSR
-                    if(shift_amount == 0) {
-                        operand2_value = 0;
-                    } else {
-                        operand2_value = operand2_value >> shift_amount;
-                    }
-                    break;
-                case 0x2: // ASR
-                    if(shift_amount == 0) {
-                        shift_amount = 32;
-                    }
-
-                    if(shift_amount >= 32) {
-                        if(operand2_value & 0x80000000) {
-                            operand2_value = 0xFFFFFFFF;
-                        } else {
-                            operand2_value = 0;
-                        }
-                    } else {
-                        operand2_value = (uint32_t)((int32_t)operand2_value >> shift_amount);
-                    }
-                    break;
-                case 0x3: // ROR
-                    if(shift_amount != 0) {
-                        operand2_value = ror32(operand2_value, shift_amount);
-                    }
-                    break;
-            }
-        } else {
-            uint32_t register_shift_amount = cpu->r[rs] & 0xFF;
-
-            switch(shift_type) {
-                case 0x0: // LSL
-                    if(register_shift_amount < 32) {
-                    operand2_value = operand2_value << register_shift_amount;
-                    } else {
-                        operand2_value = 0;
-                    }
-                    break;
-                case 0x1: // LSR
-                    if(register_shift_amount < 32) {
-                        operand2_value = operand2_value >> register_shift_amount;
-                    } else {
-                        operand2_value = 0;
-                    }
-                    break;
-                case 0x2: // ASR
-                    if(register_shift_amount >= 32) {
-                        if(operand2_value & 0x80000000) {
-                            operand2_value = 0xFFFFFFFF;
-                        } else {
-                            operand2_value = 0;
-                        }
-                    } else {
-                        operand2_value = (uint32_t)((int32_t)operand2_value >> register_shift_amount);
-                    }
-                    break;
-                case 0x3: // ROR
-                    if(register_shift_amount != 0) {
-                        operand2_value = ror32(operand2_value, register_shift_amount);
-                    }
-                    break;
-            }
+        if(s_bit) {
+            update_nz_flags(cpu, result);
+            set_flag(cpu, CPSR_C, op2.carry);
         }
     }
 
-    if (opcode == 0xD) { // MOV
-        printf("Executing MOV\n");
+    if(opcode == 0x1) { // EOR (XOR)
+        printf("\nExecuting EOR\n");
 
-        cpu->r[rd] = operand2_value;
+        uint32_t result = cpu->r[rn] ^ operand2_value;
+        cpu->r[rd] = result;
 
         if(s_bit) {
-            update_nz_flags(cpu, operand2_value);
+            update_nz_flags(cpu, result);
+            set_flag(cpu, CPSR_C, op2.carry);
+        }
+    }
+
+    if(opcode == 0x2) { // SUB
+        printf("\nExecuting SUB\n");
+
+        uint32_t a = cpu->r[rn];
+        uint32_t b = operand2_value;
+
+        uint32_t result = a - b;
+
+        cpu->r[rd] = result;
+
+        if(s_bit) {
+            update_sub_flags(cpu, a, b, result);
+            print_flags(cpu);
         }
     }
 
     if(opcode == 0x4) { // ADD
-        printf("Executing ADD\n");
+        printf("\nExecuting ADD\n");
 
         uint32_t a = cpu->r[rn];
         uint32_t b = operand2_value;
@@ -214,8 +293,17 @@ void cpu_decode_arm (CPU *cpu, uint32_t instruction) {
         }
     }
 
+    if(opcode == 0x8) { // TST
+        printf("\nExecuting TST\n");
+
+        uint32_t result = cpu->r[rn] & operand2_value;
+
+        update_nz_flags(cpu, result);
+        set_flag(cpu, CPSR_C, op2.carry);
+    }
+
     if(opcode == 0xA) { // CMP
-        printf("Executing CMP\n");
+        printf("\nExecuting CMP\n");
 
         uint32_t a = cpu->r[rn];
         uint32_t b = operand2_value;
@@ -226,20 +314,117 @@ void cpu_decode_arm (CPU *cpu, uint32_t instruction) {
         print_flags(cpu);
     }
 
-    if(opcode == 0x2) { // SUB
-        printf("Executing SUB\n");
+    if(opcode == 0xC) { // ORR
+        printf("\nExecuting ORR\n");
 
-        uint32_t a = cpu->r[rn];
-        uint32_t b = operand2_value;
-
-        uint32_t result = a - b;
-
+        uint32_t result = cpu->r[rn] | operand2_value;
         cpu->r[rd] = result;
 
         if(s_bit) {
-            update_sub_flags(cpu, a, b, result);
+            update_nz_flags(cpu, result);
+            set_flag(cpu, CPSR_C, op2.carry);
+        }
+    }
+
+    if(opcode == 0xD) { // MOV
+        printf("\nExecuting MOV\n");
+
+        cpu->r[rd] = operand2_value;
+
+        if(s_bit) {
+            update_nz_flags(cpu, operand2_value);
+            set_flag(cpu, CPSR_C, op2.carry);
+
             print_flags(cpu);
         }
+    }
+
+    if(opcode == 0xE) { // BIC
+        printf("\nExecuting BIC\n");
+
+        uint32_t result = cpu->r[rn] & ~operand2_value;
+        cpu->r[rd] = result;
+
+        if(s_bit) {
+            update_nz_flags(cpu, result);
+            set_flag(cpu, CPSR_C, op2.carry);
+        }
+    }
+
+    if(opcode == 0XF) { // MVN
+        printf("\nExecuting MVN\n");
+
+        uint32_t result = ~operand2_value;
+        cpu->r[rd] = result;
+
+        if(s_bit) {
+            update_nz_flags(cpu, result);
+            set_flag(cpu, CPSR_C, op2.carry);
+        }
+    }   
+}
+
+void cpu_execute_single_transfer(CPU *cpu, Memory *memory, uint32_t instruction) {
+    uint32_t i_bit = (instruction >> 25) & 1;
+    uint32_t p_bit = (instruction >> 24) & 1;
+    uint32_t u_bit = (instruction >> 23) & 1;
+    uint32_t b_bit = (instruction >> 22) & 1;
+    uint32_t w_bit = (instruction >> 21) & 1;
+    uint32_t l_bit = (instruction >> 20) & 1;
+
+    uint32_t rn = (instruction >> 16) & 0xF;
+    uint32_t rd = (instruction >> 12) & 0xF;
+
+    uint32_t offset = instruction & 0xFFF;
+
+    if(i_bit != 0 || b_bit != 0) {
+        printf("Transfer type not implemented yet\n");
+        return;
+    }
+
+    uint32_t base = cpu->r[rn];
+    uint32_t offset_address;
+
+    if(u_bit) {
+        offset_address = base + offset;
+    } else {
+        offset_address = base - offset;
+    }
+
+    uint32_t address;
+
+    if(p_bit) {
+        address = offset_address;
+    } else {
+        address = base;
+    }
+
+    if(l_bit == 0) {
+        printf("Executing STR\n");
+
+        uint32_t value = cpu->r[rd];
+
+        printf("Address: 0x%08X\n", address);
+        printf("Value:   0x%08X", value);
+
+        memory_write32(memory, address, value);
+    } else {
+        printf("Execiting LDR\n");
+
+        uint32_t value = memory_read32(memory, address);
+
+        cpu->r[rd] = value;
+
+        printf("Address: 0x%08X\n", address);
+        printf("Value:   0x%08X", value);
+    }
+
+    if(p_bit){
+        if(w_bit) {
+            cpu->r[rn] = offset_address;
+        }
+    } else {
+        cpu->r[rn] = offset_address;
     }
 }
 
@@ -258,11 +443,15 @@ void cpu_step(CPU *cpu, Memory *memory) {
     }
 
     uint32_t instruction_type = (instruction >> 25) & 0x7;
+    uint32_t bits_27_26 = (instruction >> 26) & 0x3;
 
     if(instruction_type  == 0x5) {
         cpu_execute_branch(cpu, instruction);
+    } else if (bits_27_26 == 0x1){
+        cpu_execute_single_transfer(cpu, memory, instruction);
+        cpu->r[15] += 4;
     } else {
-        cpu_decode_arm(cpu, instruction);
+        cpu_decode_arm(cpu, memory, instruction);
         cpu->r[15] += 4;
     }
 }

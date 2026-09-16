@@ -3,11 +3,11 @@
 .global _start
 
 _start:
-    mov r0, #3
-    mov r1, #4
-    mov r2, #2
+    mov r0, #42
+    mov r1, #0x02000000
 
-    add r3, r0, r1, lsl r2
+    str r0, [r1], #4
+    ldr r2, [r1, #-4]
 
 loop:
     b loop
